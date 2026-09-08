@@ -274,7 +274,7 @@ function stopLiveTranscribe(){
 
 /* ---------- recording ---------- */
 async function startRecording(){
-  const mime = pickMime();
+  const mime = await pickMime();
   let stream;
   try {
     // ไมค์ — ทางหลักสำหรับมือถือ (ต้องอนุญาต permission ครั้งเดียว)
@@ -300,7 +300,7 @@ async function startRecording(){
 
 async function startSystemAudioDemo(){
   // เดสก์ท็อปเท่านั้น: จับเสียงระบบของ tab นี้ (สำหรับปุ่มทดสอบ)
-  const mime = pickMime();
+  const mime = await pickMime();
   let stream;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
@@ -527,7 +527,7 @@ $('#installGo').onclick = async () => { if (deferredPrompt){ deferredPrompt.prom
   if (location.protocol === 'file:') document.getElementById('httpsWarn').style.display = 'block';
   db = await openDB();
   state.clips = (await dbAll()).sort((a,b)=>a.id-b.id);
-  const m = pickMime();
+  const m = await pickMime();
   $('#fmtHint').textContent = m ? 'ฟอร์แมตบันทึก: '+m+' • ไฟล์เก็บในเครื่องนี้เท่านั้น (IndexedDB) • สรุปด้วย Gemini' : '';
   render();
 })();
