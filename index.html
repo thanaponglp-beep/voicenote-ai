@@ -212,7 +212,7 @@ function openDB(){
     r.onerror = () => rej(r.error);
   });
 }
-const dbPut = c => new Promise((res, rej) => { const t = db.transaction('clips','readwrite'); t.objectStore('clips').put(c); t.oncomplete = res; t.onerror = () => rej(t.error); });
+const dbPut = c => new Promise((res, rej) => { if (!db) return res(); const t = db.transaction('clips','readwrite'); t.objectStore('clips').put(c); t.oncomplete = res; t.onerror = () => rej(t.error); });
 async function dbAll(){ const t = db.transaction('clips','readonly'); return new Promise(res => { const q = t.objectStore('clips').getAll(); q.onsuccess = () => res(q.result); }); }
 
 /* ---------- utils ---------- */
@@ -361,11 +361,11 @@ function stopRecording(){
     mr.stream.getTracks().forEach(t => t.stop());
     const type = (mr.mimeType || 'audio/webm').split(';')[0];
     const blob = new Blob(state.chunks, { type });
-    if (blob.size < 2000) { toast('ไฟล์ว่าง — อัดใหม่'); resetUI(); return; }
+    if (blob.size < 2000) { toast('ไฟล์ว่าง — อัดใหม่ ('+blob.size+' bytes)'); resetUI(); return; }
     const clip = { id: Date.now(), name: 'บันทึก '+new Date().toLocaleString('th-TH'), blob, status:'idle', text:'', transcript: liveText };
     state.clips.push(clip);
-    await dbPut(clip);
-    render();
+    render(); // always show playback first — never let storage block the UI
+    try { await dbPut(clip); } catch(e){ console.warn('dbPut failed:', e && e.message); toast('เก็บถาวรไม่สำเร็จ — รายการนี้จะหายถ้าปิดหน้า (playback ยังใช้ได้)'); }
     // สรุปอัตโนมัติหลังหยุดอัด (transcript + summary)
     if (store.auto){
       setTimeout(() => {
@@ -605,9 +605,14 @@ $('#installGo').onclick = async () => { if (deferredPrompt){ deferredPrompt.prom
     const ua = (navigator.userAgent.match(/(Chrome|Chromium)\/[\d.]+|Android [\d.]+/g)||[]).join(' ');
     $('#diag').textContent = 'origin:'+location.protocol+'//'+location.hostname+(location.port?':'+location.port:'')+' | secureCtx:'+secure+' | mediaDevices:'+hasMD+' | '+native+' | '+ua;
   } catch(_){}
+  // จับ error ใหญ่ ๆ แสดงหน้าเว็บ (เพื่อให้ดูจากมือถือได้)
+  window.addEventListener('error', ev => { try { $('#diag').textContent += '\nERROR: '+(ev.message||'unknown'); } catch(_){} });
+  window.addEventListener('unhandledrejection', ev => { try { $('#diag').textContent += '\nPROMISE-ERR: '+((ev.reason&&ev.reason.message)||String(ev.reason)); } catch(_){} });
   if (location.protocol === 'file:') document.getElementById('httpsWarn').style.display = 'block';
-  db = await openDB();
-  state.clips = (await dbAll()).sort((a,b)=>a.id-b.id);
+  try {
+    db = await openDB();
+    state.clips = (await dbAll()).sort((a,b)=>a.id-b.id);
+  } catch(e){ console.warn('IndexedDB unavailable:', e && e.message); $('#diag').textContent += '\nIDB:FAIL — mode volatile (บันทึกจะหายเมื่อปิดหน้า)'; }
   const m = await pickMime();
   $('#fmtHint').textContent = m ? 'ฟอร์แมตบันทึก: '+m+' • ไฟล์เก็บในเครื่องนี้เท่านั้น (IndexedDB) • สรุปด้วย Gemini' : '';
   render();
