@@ -59,6 +59,7 @@ main{max-width:680px;margin:0 auto;padding:16px}
 #installBar{display:none;background:var(--card2);border:1px solid var(--border);border-radius:12px;padding:10px 14px;margin-bottom:14px;font-size:13.5px;color:var(--muted)}
 #installBar button{margin-left:8px;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:6px 12px;cursor:pointer}
 </style>
+<script src="vosk.js"></script>
 </head>
 <body>
 <header>
@@ -137,7 +138,15 @@ main{max-width:680px;margin:0 auto;padding:16px}
     </div>
     <div class="field" style="display:flex;align-items:center;gap:8px">
       <input type="checkbox" id="liveInput" checked style="width:auto">
-      <label for="liveInput" style="margin:0;font-size:14px;color:var(--fg)">Live Transcribe — พิมพ์คำแบบเรียลไทม์ระหว่างอัด (ใช้เน็ต)</label>
+      <label for="liveInput" style="margin:0;font-size:14px;color:var(--fg)">Live Transcribe — พิมพ์คำแบบเรียลไทม์ระหว่างอัด</label>
+    </div>
+    <div class="field">
+      <label>Engine ของ Live Transcribe</label>
+      <select id="liveEngineInput">
+        <option value="auto">Auto (มี Gemini key → Gemini / ไม่มียัง Vosk ในเครื่อง)</option>
+        <option value="vosk">Vosk — รันในมือถือ (ฟรี ไม่ต้องใช้ API • ภาษาอังกฤษ)</option>
+        <option value="gemini">Gemini Live (ใช้เน็ต + API key • แม่นสุด)</option>
+      </select>
     </div>
     <div class="field" style="display:flex;align-items:center;gap:8px">
       <input type="checkbox" id="autoInput" checked style="width:auto">
@@ -157,7 +166,7 @@ main{max-width:680px;margin:0 auto;padding:16px}
 <script>
 (() => {
 const $ = s => document.querySelector(s);
-const state = { clips: [], rec: null, mediaRec: null, chunks: [], t0: 0, timerId: null, liveTimer: null, liveTranscribedUpTo: 0, pendingClip: null, audioCtx: null, pcmNode: null, ws: null, transcript: '', partial: '' };
+const state = { clips: [], rec: null, mediaRec: null, chunks: [], t0: 0, timerId: null, liveTimer: null, liveTranscribedUpTo: 0, pendingClip: null, audioCtx: null, pcmNode: null, ws: null, transcript: '', partial: '', voskModel: null, voskRec: null };
 
 /* ---------- settings: localStorage, or Android native storage if wrapped in APK ---------- */
 // NOTE: Java JavascriptInterface methods are getNative/setNative (not get/set)
@@ -201,6 +210,9 @@ const store = {
   get localToken(){ return hasNative ? (nGet('localtoken') || '') : (localStorage.getItem('vnai_localtoken') || ''); },
   set localToken(v){ nSet('localtoken', v); localStorage.setItem('vnai_localtoken', v); }
 };
+// live engine: 'auto' = มี Gemini key ใช้ Gemini / ไม่มีใช้ Vosk on-device | 'vosk' = on-device เสมอ | 'gemini'
+const getLiveEngine = () => { const d = hasNative ? nGet('liveEngine') : localStorage.getItem('vnai_liveengine'); return d || 'auto'; };
+const setLiveEngine = v => { nSet('liveEngine', v); localStorage.setItem('vnai_liveengine', v); };
 
 /* ---------- IndexedDB ---------- */
 let db;
@@ -226,11 +238,64 @@ async function pickMime(){
   return '';
 }
 
+/* ---------- Vosk Live Transcribe (on-device, ฟรี ไม่ต้องใช้ API key) ---------- */
+const VOSK_MODEL_URL = new URL('vosk-model-en-us.tar.gz', location.href).href;
+
+async function startVoskLive(stream){
+  state.transcript = ''; state.partial = '';
+  state.liveEngine = 'vosk';
+  $('#liveBox').style.display = 'block';
+  $('#liveText').textContent = '';
+  try {
+    if (!state.voskModel){
+      liveStatus('โหลดโมเดล ~41MB… (ครั้งแรกเท่านั้น)', 'var(--accent2)');
+      state.voskModel = await Vosk.createModel(VOSK_MODEL_URL);
+    }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AC(); // sampleRate ตามเครื่อง (48k/44.1k) — จะ resample ลง 16k เอง
+    const sr = ctx.sampleRate, ratio = sr / 16000;
+    const srcNode = ctx.createMediaStreamSource(stream);
+    const pcm = ctx.createScriptProcessor(4096, 1, 1);
+    const RecCtor = state.voskModel.KaldiRecognizer;
+    const rec = new RecCtor(16000);
+    state.voskRec = rec;
+    liveStatus('● on-device… (ไม่ใช้ API)');
+    rec.on('partialresult', d => { const t = d && d.result && d.result.text; if (t){ state.partial = t; renderLive(); } });
+    rec.on('result',        d => { const t = d && d.result && d.result.text; if (t){ state.transcript += t + ' '; state.partial = ''; renderLive(); } });
+    pcm.onaudioprocess = e => {
+      const f32 = e.inputBuffer.getChannelData(0);
+      const outLen = Math.floor(f32.length / ratio);
+      if (outLen < 8) return;
+      const out = new Float32Array(outLen);
+      for (let i=0;i<outLen;i++){
+        const pos = i*ratio, i0 = pos|0, frac = pos - i0;
+        out[i] = f32[i0]*(1-frac) + f32[Math.min(i0+1, f32.length-1)]*frac; // linear resample → 16kHz
+      }
+      try { rec.acceptWaveformFloat(out, 16000); } catch(_){}
+    };
+    srcNode.connect(pcm);
+    pcm.connect(ctx.createGain()); // ต้อง connect ถึงจะ fire (Android WebView)
+    state.audioCtx = ctx; state.pcmNode = pcm;
+  } catch(e){
+    liveStatus('Vosk ล้มเหลว: '+(e && e.message || e), 'var(--err)');
+    console.error('vosk init', e);
+  }
+}
+
+function stopVoskLive(){
+  // เก็บ final result แล้วค่อยปล่อย recognizer (โมเดลเก็บไว้ใช้ต่อ — โหลดครั้งเดียว)
+  try { if (state.voskRec){ state.voskRec.retrieveFinalResult(); setTimeout(()=>{ try{ state.voskRec.remove(); }catch(_){} }, 500); state.voskRec = null; } } catch(_){}
+  // ปล่อยโมเดลถ้าไม่ใช้ต่อภายใน 60 วิ (ประหยัด RAM มือถือ)
+  clearTimeout(state._voskIdleT);
+  state._voskIdleT = setTimeout(() => { try { if (state.voskModel && !state.mediaRec){ state.voskModel.terminate(); state.voskModel = null; } } catch(_){} }, 60000);
+}
+
 /* ---------- Gemini Live Transcribe (WebSocket, word-by-word) ---------- */
 function liveStatus(msg, cls){ const e = $('#liveStatus'); if(!e) return; e.textContent = msg || ''; e.style.color = cls || 'var(--muted)'; }
 
 function startLiveTranscribe(stream){
   state.transcript = ''; state.partial = '';
+  state.liveEngine = 'gemini';
   $('#liveBox').style.display = 'block';
   $('#liveText').textContent = '';
   const key = store.k;
@@ -323,7 +388,17 @@ async function startRecording(){
   state.t0 = Date.now();
   state.timerId = setInterval(() => { $('#recordLabel').textContent = '● กำลังอัด… '+fmtTime((Date.now()-state.t0)/1000); }, 250);
   $('#recordBtn').classList.add('recording');
-  if (store.live) startLiveTranscribe(stream); // live word-by-word (ใช้เน็ต)
+  if (store.live) startLiveEngine(stream); // live word-by-word — engine เลือกตาม ⚙
+}
+
+/* ---------- live engine dispatcher ---------- */
+function startLiveEngine(stream){
+  const eng = getLiveEngine();
+  if (eng === 'gemini') return startLiveTranscribe(stream);
+  if (eng === 'vosk')   return startVoskLive(stream);
+  // auto: มี Gemini key → Gemini / ไม่มียังมี Vosk on-device (ไม่ต้องใช้ key)
+  if (store.k) return startLiveTranscribe(stream);
+  return startVoskLive(stream);
 }
 
 async function startSystemAudioDemo(){
@@ -354,10 +429,23 @@ function stopRecording(){
   if (!state.mediaRec) return;
   clearInterval(state.timerId);
   const mr = state.mediaRec;
-  const liveText = state.transcript.trim(); // เก็บ transcript ที่พิมพ์ระหว่างอัด
-  stopLiveTranscribe();
-  $('#liveBox').style.display = 'none';
-  mr.onstop = async () => {
+  // Vosk: ขอ final result ก่อนเก็บ transcript (รอ ~1 วิ ให้ event กลับมาถึง)
+  const waitForVoskFinal = () => new Promise(res => {
+    if (state.liveEngine !== 'vosk' || !state.voskRec){ res(); return; }
+    try { state.voskRec.retrieveFinalResult(); } catch(_){}
+    setTimeout(() => { try{ state.voskRec.remove(); }catch(_){} state.voskRec = null; res(); }, 1000);
+  });
+  // Vosk: ขอ final result ก่อน (event กลับมา async ~1 วิ) → เก็บ transcript + stop recorder ใน callback
+  const finishStop = () => {
+    const liveText = state.transcript.trim(); // เก็บ transcript ที่พิมพ์ระหว่างอัด
+    if (state.liveEngine === 'vosk'){
+      clearTimeout(state._voskIdleT);
+      state._voskIdleT = setTimeout(() => { try { if (state.voskModel && !state.mediaRec){ state.voskModel.terminate(); state.voskModel = null; } } catch(_){} }, 60000);
+    } else {
+      stopLiveTranscribe();
+    }
+    $('#liveBox').style.display = 'none';
+    mr.onstop = async () => {
     mr.stream.getTracks().forEach(t => t.stop());
     const type = (mr.mimeType || 'audio/webm').split(';')[0];
     const blob = new Blob(state.chunks, { type });
@@ -373,9 +461,11 @@ function stopRecording(){
         if (el && clip.status !== 'busy') summarize(el, clip);
       }, 300);
     }
+    };
+    mr.stop();
+    resetUI();
   };
-  mr.stop();
-  resetUI();
+  waitForVoskFinal().then(finishStop); // Gemini: ผ่านทันที / Vosk: รอ final result ~1 วิ
 }
 
 function resetUI(){
@@ -454,13 +544,9 @@ async function summarize(clipEl, clip){
     let text;
     const useText = store.sumModel === 'deepseek' || store.sumModel === 'local';
     if (useText){
-      // local / deepseek รับแค่ text — ต้องมี transcript (ถ้าไม่มี → fallback Gemini ฟังเสียงเอง)
-      if (clip.transcript){
-        text = store.sumModel === 'local' ? await callLocal(clip.transcript) : await callDeepSeek(clip.transcript);
-      } else {
-        const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(clip.blob); });
-        text = await callGemini(b64, clip.blob.type || 'audio/webm', '');
-      }
+      // local / deepseek รับแค่ text — ต้องมี transcript เท่านั้น (ห้ามแอบ fallback Gemini)
+      if (!clip.transcript) throw new Error('ยังไม่มี transcript — ลองใหม่: เปิด Live Transcribe (⚙) แล้วอัดใหม่อีกครั้ง');
+      text = store.sumModel === 'local' ? await callLocal(clip.transcript) : await callDeepSeek(clip.transcript);
     } else {
       const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(clip.blob); });
       text = await callGemini(b64, clip.blob.type || 'audio/webm', clip.transcript || '');
@@ -568,6 +654,7 @@ $('#settingsBtn').onclick = () => {
   if ($('#localUrlInput')) $('#localUrlInput').value = store.localUrl;
   if ($('#localTokenInput')) $('#localTokenInput').value = store.localToken;
   $('#liveInput').checked = store.live;
+  if ($('#liveEngineInput')) $('#liveEngineInput').value = getLiveEngine();
   $('#autoInput').checked = store.auto;
   modal.classList.add('open');
 };
@@ -582,6 +669,7 @@ $('#settingsSave').onclick = () => {
   if ($('#localUrlInput')) store.localUrl = $('#localUrlInput').value.trim().replace(/\/+$/, '');
   if ($('#localTokenInput')) store.localToken = $('#localTokenInput').value.trim();
   store.live = $('#liveInput').checked;
+  if ($('#liveEngineInput')) setLiveEngine($('#liveEngineInput').value);
   store.auto = $('#autoInput').checked;
   modal.classList.remove('open');
   toast('บันทึกแล้ว');
@@ -614,7 +702,7 @@ $('#installGo').onclick = async () => { if (deferredPrompt){ deferredPrompt.prom
     state.clips = (await dbAll()).sort((a,b)=>a.id-b.id);
   } catch(e){ console.warn('IndexedDB unavailable:', e && e.message); $('#diag').textContent += '\nIDB:FAIL — mode volatile (บันทึกจะหายเมื่อปิดหน้า)'; }
   const m = await pickMime();
-  $('#fmtHint').textContent = m ? 'ฟอร์แมตบันทึก: '+m+' • ไฟล์เก็บในเครื่องนี้เท่านั้น (IndexedDB) • สรุปด้วย Gemini' : '';
+  $('#fmtHint').textContent = m ? 'ฟอร์แมตบันทึก: '+m+' • ไฟล์เก็บในเครื่องนี้เท่านั้น (IndexedDB) • Transcribe/สรุป เลือกได้ใน ⚙' : '';
   render();
 })();
 })();

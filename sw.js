@@ -1,4 +1,4 @@
-const CACHE = 'voicenote-v1';
+const CACHE = 'voicenote-v2';
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(['./','./index.html','./manifest.json'])).then(() => self.skipWaiting()));
 });
