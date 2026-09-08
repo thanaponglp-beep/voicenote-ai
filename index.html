@@ -96,8 +96,19 @@ main{max-width:680px;margin:0 auto;padding:16px}
   <div class="modal">
     <h2>ตั้งค่า</h2>
     <div class="field">
-      <label>Gemini API Key (เก็บในเครื่องนี้เท่านั้น)</label>
+      <label>Gemini API Key (transcribe เสียง + สรุปถ้าเลือก Gemini)</label>
       <input type="password" id="apiKeyInput" placeholder="AIza...">
+    </div>
+    <div class="field">
+      <label>โมเดลสรุป</label>
+      <select id="sumModelInput">
+        <option value="gemini">Gemini (ฟังเสียงเอง — แม่นสุด)</option>
+        <option value="deepseek">DeepSeek (สรุปจาก transcript — ต้องเปิด live) </option>
+      </select>
+    </div>
+    <div class="field" id="dsKeyField">
+      <label>DeepSeek API Key (ถ้าเลือก DeepSeek — ได้ที่ platform.deepseek.com)</label>
+      <input type="password" id="dsKeyInput" placeholder="sk-...">
     </div>
     <div class="field">
       <label>Model</label>
@@ -171,7 +182,11 @@ const store = {
   get live(){ const d = hasNative ? nGet('live') : localStorage.getItem('vnai_live'); return d === undefined || d === '' ? true : (d !== '0'); },
   set live(v){ const s = v ? '1' : '0'; nSet('live', s); localStorage.setItem('vnai_live', s); },
   get auto(){ const d = hasNative ? nGet('auto') : localStorage.getItem('vnai_auto'); return d === undefined || d === '' ? true : (d !== '0'); },
-  set auto(v){ const s = v ? '1' : '0'; nSet('auto', s); localStorage.setItem('vnai_auto', s); }
+  set auto(v){ const s = v ? '1' : '0'; nSet('auto', s); localStorage.setItem('vnai_auto', s); },
+  get sumModel(){ return hasNative ? (nGet('sumModel') || 'gemini') : (localStorage.getItem('vnai_summodel') || 'gemini'); },
+  set sumModel(v){ nSet('sumModel', v); localStorage.setItem('vnai_summodel', v); },
+  get dsKey(){ return hasNative ? (nGet('dskey') || '') : (localStorage.getItem('vnai_dskey') || ''); },
+  set dsKey(v){ nSet('dskey', v); localStorage.setItem('vnai_dskey', v); }
 };
 
 /* ---------- IndexedDB ---------- */
@@ -356,6 +371,21 @@ function resetUI(){
   $('#recordLabel').textContent = 'แตะเพื่อเริ่มอัดเสียง';
 }
 
+/* ---------- DeepSeek (text-only: สรุปจาก transcript) ---------- */
+async function callDeepSeek(transcript){
+  const key = store.dsKey;
+  if (!key) throw new Error('ยังไม่ได้ใส่ DeepSeek API Key — กด ⚙');
+  const prompt = `1) ตรวจแก้คำผิด/จัดรูปประโยคของข้อความด้านล่างให้ลื่นไหล (รักษาภาษาเดิม)\n2) สรุปใจความสำคัญเป็นข้อ ๆ (bullet points)\nตอบด้วยภาษา: ${store.lang}\n\nข้อความ:\n"""${transcript}"""`;
+  const res = await fetch('https://api.deepseek.com/chat/completions', {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json', Authorization:'Bearer '+key },
+    body: JSON.stringify({ model:'deepseek-chat', messages:[{ role:'user', content: prompt }] })
+  });
+  const j = await res.json();
+  if (!res.ok) throw new Error('DeepSeek: '+(j.error?.message || ('HTTP '+res.status)));
+  return j.choices?.[0]?.message?.content || '';
+}
+
 /* ---------- Gemini ---------- */
 const MODELS = ['gemini-2.5-flash','gemini-3.8-flash'];
 async function callGemini(b64, mime, hintTranscript){
@@ -389,9 +419,19 @@ async function summarize(clipEl, clip){
   btns.forEach(b => { b.disabled = true; b.textContent = 'กำลังสรุป…'; });
   setBadge(clipEl, 'busy', 'ประมวลผล…');
   try {
-    const mime = clip.blob.type || 'audio/webm';
-    const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(clip.blob); });
-    const text = await callGemini(b64, mime, clip.transcript || '');
+    let text;
+    if (store.sumModel === 'deepseek'){
+      if (clip.transcript) {
+        text = await callDeepSeek(clip.transcript);
+      } else {
+        // ไม่มี transcript (ปิด live ไว้) → fallback Gemini ฟังเสียงเอง
+        const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(clip.blob); });
+        text = await callGemini(b64, clip.blob.type || 'audio/webm', '');
+      }
+    } else {
+      const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(clip.blob); });
+      text = await callGemini(b64, clip.blob.type || 'audio/webm', clip.transcript || '');
+    }
     clip.status = 'done'; clip.text = text;
     const div = clipEl.querySelector('.result');
     div.textContent = text; div.style.display = 'block';
@@ -490,6 +530,8 @@ $('#settingsBtn').onclick = () => {
   $('#apiKeyInput').value = store.k;
   $('#modelInput').value = store.model;
   $('#langInput').value = store.lang;
+  $('#sumModelInput').value = store.sumModel;
+  $('#dsKeyInput').value = store.dsKey;
   $('#liveInput').checked = store.live;
   $('#autoInput').checked = store.auto;
   modal.classList.add('open');
@@ -500,6 +542,8 @@ $('#settingsSave').onclick = () => {
   store.key = $('#apiKeyInput').value.trim();
   store.model = $('#modelInput').value;
   store.lang = $('#langInput').value;
+  store.sumModel = $('#sumModelInput').value;
+  store.dsKey = $('#dsKeyInput').value.trim();
   store.live = $('#liveInput').checked;
   store.auto = $('#autoInput').checked;
   modal.classList.remove('open');
