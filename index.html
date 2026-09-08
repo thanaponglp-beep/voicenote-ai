@@ -102,7 +102,7 @@ main{max-width:680px;margin:0 auto;padding:16px}
     <div class="field">
       <label>โมเดลสรุป</label>
       <select id="sumModelInput">
-        <option value="local">Local PC — Qwen ของคุณ (ฟรี 100% • ต้องเปิด PC + Wi-Fi เดียวกัน)</option>
+        <option value="local">Local PC — Qwen ของคุณ (ฟรี 100% • PC ต้องเปิดอยู่)</option>
         <option value="gemini">Gemini (ฟังเสียงเอง — แม่นสุด)</option>
         <option value="deepseek">DeepSeek (สรุปจาก transcript — ต้องเปิด live) </option>
       </select>
@@ -110,6 +110,10 @@ main{max-width:680px;margin:0 auto;padding:16px}
     <div class="field" id="localUrlField">
       <label>Local Server URL (ถ้าเข้า app จาก GitHub Pages — ปล่อยว่างถ้าใช้ https://192.168.x.x:8443 ตรง ๆ)</label>
       <input type="text" id="localUrlInput" placeholder="https://192.168.1.136:8443">
+    </div>
+    <div class="field" id="localTokenField">
+      <label>รหัสลับ Local Server (ถ้า PC ตั้งไว้ — ปล่อยว่างถ้าไม่ตั้ง)</label>
+      <input type="password" id="localTokenInput" placeholder="••••••">
     </div>
     <div class="field" id="dsKeyField">
       <label>DeepSeek API Key (ถ้าเลือก DeepSeek — ได้ที่ platform.deepseek.com)</label>
@@ -193,7 +197,9 @@ const store = {
   get dsKey(){ return hasNative ? (nGet('dskey') || '') : (localStorage.getItem('vnai_dskey') || ''); },
   set dsKey(v){ nSet('dskey', v); localStorage.setItem('vnai_dskey', v); },
   get localUrl(){ return hasNative ? (nGet('localurl') || '') : (localStorage.getItem('vnai_localurl') || ''); },
-  set localUrl(v){ nSet('localurl', v); localStorage.setItem('vnai_localurl', v); }
+  set localUrl(v){ nSet('localurl', v); localStorage.setItem('vnai_localurl', v); },
+  get localToken(){ return hasNative ? (nGet('localtoken') || '') : (localStorage.getItem('vnai_localtoken') || ''); },
+  set localToken(v){ nSet('localtoken', v); localStorage.setItem('vnai_localtoken', v); }
 };
 
 /* ---------- IndexedDB ---------- */
@@ -385,11 +391,13 @@ async function callLocal(transcript){
   const base = location.port === '8443' ? '' : store.localUrl;
   if (!base) throw new Error('ยังไม่ได้ตั้ง Local Server URL — กด ⚙ ใส่ https://192.168.x.x:8443');
   const prompt = `สรุปใจความสำคัญเป็นข้อ ๆ (bullet points) ตอบด้วยภาษา: ${store.lang}\n\nข้อความ:\n"""${transcript}"""`;
-  const res = await fetch((base || '') + '/v1/chat/completions', {
+  const url = base + '/v1/chat/completions' + (store.localToken ? '?token=' + encodeURIComponent(store.localToken) : '');
+  const res = await fetch(url, {
     method:'POST',
     headers:{ 'Content-Type':'application/json' },
     body: JSON.stringify({ model:'local', messages:[{ role:'user', content: prompt }], temperature:0.3 })
   });
+  if (res.status === 403) throw new Error('รหัสลับไม่ถูกต้อง — กด ⚙ ใส่ "รหัสลับ" ให้ตรงกับเครื่อง PC');
   const j = await res.json();
   if (!res.ok) throw new Error('Local PC: '+(j.error?.message || ('HTTP '+res.status)));
   return j.choices?.[0]?.message?.content || '';
@@ -558,6 +566,7 @@ $('#settingsBtn').onclick = () => {
   $('#sumModelInput').value = store.sumModel;
   $('#dsKeyInput').value = store.dsKey;
   if ($('#localUrlInput')) $('#localUrlInput').value = store.localUrl;
+  if ($('#localTokenInput')) $('#localTokenInput').value = store.localToken;
   $('#liveInput').checked = store.live;
   $('#autoInput').checked = store.auto;
   modal.classList.add('open');
@@ -571,6 +580,7 @@ $('#settingsSave').onclick = () => {
   store.sumModel = $('#sumModelInput').value;
   store.dsKey = $('#dsKeyInput').value.trim();
   if ($('#localUrlInput')) store.localUrl = $('#localUrlInput').value.trim().replace(/\/+$/, '');
+  if ($('#localTokenInput')) store.localToken = $('#localTokenInput').value.trim();
   store.live = $('#liveInput').checked;
   store.auto = $('#autoInput').checked;
   modal.classList.remove('open');
